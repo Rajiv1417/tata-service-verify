@@ -406,7 +406,7 @@ def main():
                         status = "CHECK - Tata place near pin, name differs"
                     else:
                         status = "NOT FOUND"
-                    if not status.startswith(("WRONG", "NOT AT")):
+                    if not status.startswith(("WRONG", "NOT AT", "CHECK - name found")):
                         b = None
                 df.at[i, "Status"] = status
                 if b:
