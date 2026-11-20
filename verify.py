@@ -72,7 +72,7 @@ ADDR_STOP = {
 WEAK_TOKENS = {
     "motors", "motor", "automobiles", "automobile", "auto", "autos", "automotive",
     "agencies", "agency", "enterprises", "enterprise", "garage", "trucks", "truck",
-    "mega", "shree", "shri", "sri", "new", "wheels", "automobile", "autowheel", "autowheels",
+    "mega", "shree", "shri", "sri", "new", "wheels", "automotives", "authrised", "autorised", "automobile", "autowheel", "autowheels",
 }
 
 
@@ -125,7 +125,7 @@ def _tokens(text):
     return set(re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).split())
 
 
-def name_score(ours, theirs, their_addr="", our_addr=""):
+def name_score(ours, theirs, their_addr="", our_addr="", set_only=False):
     """0-100 similarity of the *distinctive* part of two workshop names."""
     if _tokens(theirs) & OTHER_BRANDS:
         return 0
@@ -139,6 +139,8 @@ def name_score(ours, theirs, their_addr="", our_addr=""):
     db = [t for t in b if t not in WEAK_TOKENS]
     if da and db:
         x, y = " ".join(da), " ".join(db)
+        if set_only:
+            return fuzz.token_set_ratio(x, y)
         # set ratio forgives extra words, sort ratio punishes them ("Global" vs "Global IT Solutions")
         return 0.5 * fuzz.token_set_ratio(x, y) + 0.5 * fuzz.token_sort_ratio(x, y)
     if da or db:
@@ -286,6 +288,11 @@ def _box(lat, lon, m):
             "high": {"latitude": lat + dlat, "longitude": lon + dlon}}
 
 
+def is_passenger_car(name):
+    t = _tokens(name.replace(".", " "))
+    return bool(t & {"car", "cars", "passenger", "pv", "ev", "nexon", "punch"})
+
+
 def best_candidate(row, lat, lon, places):
     best = None
     for p in places:
@@ -293,13 +300,17 @@ def best_candidate(row, lat, lon, places):
         if "latitude" not in loc:
             continue
         g_name = p.get("displayName", {}).get("text", "")
+        if is_passenger_car(g_name):
+            continue
         g_addr = p.get("formattedAddress", "")
-        score = name_score(row["Name"], g_name, g_addr, f'{row.get("Address", "")} {row.get("City", "")}')
+        our_addr = f'{row.get("Address", "")} {row.get("City", "")}'
+        score = name_score(row["Name"], g_name, g_addr, our_addr)
+        set_score = name_score(row["Name"], g_name, g_addr, our_addr, set_only=True)
         dist = haversine_m(lat, lon, loc["latitude"], loc["longitude"])
         # prefer a good name match, then the closest
         key = (score >= NAME_OK, score >= NAME_WEAK, -dist if score >= NAME_WEAK else score)
         if best is None or key > best["key"]:
-            best = {"key": key, "name": g_name, "score": score, "dist": dist,
+            best = {"key": key, "name": g_name, "score": score, "set": set_score, "dist": dist,
                     "addr": g_addr, "id": p.get("id", ""),
                     "glat": loc["latitude"], "glon": loc["longitude"],
                     "bstatus": p.get("businessStatus", "")}
@@ -310,6 +321,10 @@ def classify_local(b):
     if not b or b["score"] < NAME_WEAK:
         return None
     s, d = b["score"], b["dist"]
+    # next to the pin, a Tata-branded listing containing our whole distinctive name is enough
+    # ("Ideal Automobiles tata authrised workshop", "Desai Automotives Pvt Ltd")
+    if d <= OK_DIST_M and b["set"] >= 95 and "tata" in b["name"].lower():
+        return "VERIFIED"
     if s >= NAME_OK and d <= OK_DIST_M:
         return "VERIFIED"
     if s >= NAME_OK and d <= NEAR_DIST_M:
@@ -329,6 +344,8 @@ def classify_wide(row, b):
         return None
     if pin_match or same_locality(row.get("Address", ""), b["addr"]):
         return "WRONG COORDS - workshop found at its address, away from pin"
+    if b["dist"] <= 5000:
+        return "CHECK - name found 1.5-5 km from pin"
     return "NOT AT PIN - same name found elsewhere (other branch?)"
 
 
@@ -372,8 +389,8 @@ def main():
                 if status in (None, "CHECK - similar name nearby"):
                     # anything Tata-branded close to the point?
                     near = api.nearby_tata(lat, lon)
-                    tata = [p.get("displayName", {}).get("text", "") for p in near
-                            if "tata" in p.get("displayName", {}).get("text", "").lower()]
+                    tata = [n for n in (p.get("displayName", {}).get("text", "") for p in near)
+                            if "tata" in n.lower() and not is_passenger_car(n)]
                     df.at[i, "Tata place within 500 m"] = " | ".join(tata[:3])
                     b2 = best_candidate(row, lat, lon, near)
                     s2 = classify_local(b2)

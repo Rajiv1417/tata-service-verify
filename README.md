@@ -15,7 +15,7 @@ Results are cached in `places_cache.json`. If the run stops, run the same comman
 
 ## How it searches
 1. Searches the workshop name **only within ~1 km of the given pin**.
-2. If not found there, looks for any Tata-branded place within 500 m.
+2. If not found there, looks for any Tata CV-branded place within 500 m (Tata passenger-car listings are ignored).
 3. If still not found, searches the name (+ PIN code from the Address) over a wider area and
    compares Google's address with ours to tell "pin is wrong" from "that's another branch".
 
@@ -28,6 +28,7 @@ Results are cached in `places_cache.json`. If the run stops, run the same comman
 | CHECK - similar name nearby | Partial name match within 200 m | confirm name |
 | CHECK - Tata place near pin, name differs | A Tata listing is near the pin under another name | confirm |
 | WRONG COORDS - workshop found at its address, away from pin | Google has it at the PIN/locality in our Address | replace with Google lat/lon after a look |
+| CHECK - name found 1.5-5 km from pin | Same name close by but address doesn't confirm it | look at both map links |
 | NOT AT PIN - same name found elsewhere (other branch?) | Same dealer name, different town | check manually |
 | NOT FOUND | Nothing on Google near the pin | check manually |
 
