@@ -32,7 +32,8 @@ OK_DIST_M = 200          # accepted coordinate error
 NEAR_DIST_M = 500        # 200-500 m => "check"
 NAME_OK = 80             # fuzzy score (0-100) treated as a name match
 NAME_WEAK = 60           # below this = no match
-BIAS_RADIUS_M = 2000     # search is biased (not restricted) around the given coordinate
+LOCAL_BOX_M = 1000       # step 1: search only inside +/-1 km of the given coordinate
+WIDE_BIAS_M = 50000      # step 2 (fallback): wider search to find where the workshop really is
 SLEEP_S = 0.15           # pause between API calls
 CACHE_FILE = "places_cache.json"
 
@@ -46,13 +47,32 @@ GENERIC = {
     "pvt", "ltd", "limited", "private", "p", "i", "india", "co", "company", "the",
     "m", "s", "ms", "and", "tata", "commercial", "vehicle", "vehicles", "service",
     "services", "workshop", "centre", "center", "dealer", "dealership", "authorised",
-    "authorized", "cv", "sales", "llp", "inc", "pltd", "plt",
+    "authorized", "cv", "sales", "llp", "inc", "pltd", "plt", "station", "point",
+    "trucks", "buses", "bus", "container", "sv", "pa",
+}
+# a Google place carrying another brand is never "our" workshop
+OTHER_BRANDS = {
+    "force", "leyland", "ashok", "eicher", "bharatbenz", "benz", "mahindra", "maruti",
+    "suzuki", "hyundai", "honda", "toyota", "kia", "isuzu", "volvo", "scania", "piaggio",
+    "bajaj", "hero", "tvs", "yamaha", "renault", "nissan", "skoda", "volkswagen", "mg",
+    "smartchoice", "sml", "atul", "olectra",
+}
+# address words that don't identify a locality
+ADDR_STOP = {
+    "road", "near", "opp", "opposite", "village", "vill", "post", "dist", "distt", "district",
+    "tehsil", "thesil", "highway", "india", "nagar", "main", "floor", "ground", "plot", "khasra",
+    "khasara", "behind", "beside", "colony", "area", "sector", "phase", "national", "state",
+    "bypass", "baypass", "chowk", "marg", "street", "cross", "industrial", "estate", "midc",
+    "survey", "flat", "tata", "motors", "service", "station", "workshop", "hotel", "dhaba",
+    "pradesh", "rajasthan", "maharashtra", "gujarat", "karnataka", "bihar", "assam", "tamil",
+    "nadu", "kerala", "punjab", "haryana", "odisha", "orissa", "jharkhand", "bengal", "west",
+    "andhra", "telangana", "uttar", "madhya", "chhattisgarh", "uttarakhand", "himachal",
 }
 # common in dealer names; kept for display but not enough on their own to call a match
 WEAK_TOKENS = {
     "motors", "motor", "automobiles", "automobile", "auto", "autos", "automotive",
     "agencies", "agency", "enterprises", "enterprise", "garage", "trucks", "truck",
-    "mega", "shree", "shri", "sri", "new",
+    "mega", "shree", "shri", "sri", "new", "wheels", "automobile", "autowheel", "autowheels",
 }
 
 
@@ -101,25 +121,52 @@ def clean_name(name):
     return " ".join(t for t in s.split() if t not in GENERIC)
 
 
-def name_score(ours, theirs):
-    a, b = clean_name(ours), clean_name(theirs)
+def _tokens(text):
+    return set(re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).split())
+
+
+def name_score(ours, theirs, their_addr="", our_addr=""):
+    """0-100 similarity of the *distinctive* part of two workshop names."""
+    if _tokens(theirs) & OTHER_BRANDS:
+        return 0
+    a, b = clean_name(ours).split(), clean_name(theirs).split()
+    # drop place names that are part of the name ("Rudra Motors Menar", "... Tambaram")
+    a = [t for t in a if t in b or t not in _tokens(their_addr)] or a
+    b = [t for t in b if t in a or t not in _tokens(our_addr)] or b
     if not a or not b:
         return 0
-    distinct_a = [t for t in a.split() if t not in WEAK_TOKENS]
-    distinct_b = [t for t in b.split() if t not in WEAK_TOKENS]
-    if distinct_a and distinct_b:
-        # the distinctive part must match ("Popular", "Jai Baba Mungipa"); "Motors" alone is not enough
-        return fuzz.token_set_ratio(" ".join(distinct_a), " ".join(distinct_b))
-    if distinct_a or distinct_b:
+    da = [t for t in a if t not in WEAK_TOKENS]
+    db = [t for t in b if t not in WEAK_TOKENS]
+    if da and db:
+        x, y = " ".join(da), " ".join(db)
+        # set ratio forgives extra words, sort ratio punishes them ("Global" vs "Global IT Solutions")
+        return 0.5 * fuzz.token_set_ratio(x, y) + 0.5 * fuzz.token_sort_ratio(x, y)
+    if da or db:
         return 0                                   # e.g. "Hazi Motors" vs a generic "Tata Motors Service"
-    return min(fuzz.token_set_ratio(a, b), 70)   # both sides only generic words: cap below NAME_OK
+    return min(fuzz.token_set_ratio(" ".join(a), " ".join(b)), 70)
 
 
-def search_query(row):
-    q = re.sub(r"-\s*\d{5,}\s*$", "", str(row["Name"])).strip()
-    city = str(row.get("City", "") or "").strip()
-    if city and city.lower() not in q.lower() and city.lower() not in ("na", "nan"):
-        q += f" {city}"
+def base_name(row):
+    return re.sub(r"-\s*\d+\s*$", "", str(row["Name"])).replace("_", " ").strip()
+
+
+def pin_codes(text):
+    return set(re.findall(r"(?<!\d)(\d{6})(?!\d)", str(text)))
+
+
+def same_locality(our_addr, google_addr):
+    """True if our Address and Google's address share a PIN code or a place name."""
+    if pin_codes(our_addr) & pin_codes(google_addr):
+        return True
+    words = lambda t: {w for w in _tokens(t) if len(w) >= 4 and w.isalpha() and w not in ADDR_STOP}
+    return bool(words(our_addr) & words(google_addr))
+
+
+def wide_query(row):
+    q = base_name(row)
+    pins = pin_codes(row.get("Address", ""))
+    if pins:
+        q += " " + sorted(pins)[0]
     return q
 
 
@@ -210,11 +257,17 @@ class Places:
                      "Check the API key, that 'Places API (New)' is enabled, and billing is linked.")
         sys.exit("\nAPI kept failing (rate limit / server error). Re-run later; finished rows are cached.")
 
-    def text_search(self, query, lat, lon):
+    def local_search(self, query, lat, lon):
+        """Only places inside a ~2 km x 2 km box around the coordinate."""
+        body = {"textQuery": query, "pageSize": 10, "languageCode": "en", "regionCode": "IN",
+                "locationRestriction": {"rectangle": _box(lat, lon, LOCAL_BOX_M)}}
+        return self._post(TEXT_URL, body, f"L|{query}|{lat:.5f}|{lon:.5f}")
+
+    def wide_search(self, query, lat, lon):
         body = {"textQuery": query, "pageSize": 10, "languageCode": "en", "regionCode": "IN",
                 "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lon},
-                                            "radius": BIAS_RADIUS_M}}}
-        return self._post(TEXT_URL, body, f"T|{query}|{lat:.5f}|{lon:.5f}")
+                                            "radius": WIDE_BIAS_M}}}
+        return self._post(TEXT_URL, body, f"W|{query}|{lat:.5f}|{lon:.5f}")
 
     def nearby_tata(self, lat, lon):
         body = {"textQuery": "Tata Motors service", "pageSize": 10, "languageCode": "en",
@@ -233,38 +286,50 @@ def _box(lat, lon, m):
             "high": {"latitude": lat + dlat, "longitude": lon + dlon}}
 
 
-def best_candidate(name, lat, lon, places):
+def best_candidate(row, lat, lon, places):
     best = None
     for p in places:
         loc = p.get("location", {})
         if "latitude" not in loc:
             continue
         g_name = p.get("displayName", {}).get("text", "")
-        score = name_score(name, g_name)
+        g_addr = p.get("formattedAddress", "")
+        score = name_score(row["Name"], g_name, g_addr, f'{row.get("Address", "")} {row.get("City", "")}')
         dist = haversine_m(lat, lon, loc["latitude"], loc["longitude"])
         # prefer a good name match, then the closest
         key = (score >= NAME_OK, score >= NAME_WEAK, -dist if score >= NAME_WEAK else score)
         if best is None or key > best["key"]:
             best = {"key": key, "name": g_name, "score": score, "dist": dist,
-                    "addr": p.get("formattedAddress", ""), "id": p.get("id", ""),
+                    "addr": g_addr, "id": p.get("id", ""),
                     "glat": loc["latitude"], "glon": loc["longitude"],
                     "bstatus": p.get("businessStatus", "")}
     return best
 
 
-def classify(b):
-    if not b:
-        return "NOT FOUND"
+def classify_local(b):
+    if not b or b["score"] < NAME_WEAK:
+        return None
     s, d = b["score"], b["dist"]
     if s >= NAME_OK and d <= OK_DIST_M:
         return "VERIFIED"
     if s >= NAME_OK and d <= NEAR_DIST_M:
         return "CHECK - name OK, 200-500 m away"
     if s >= NAME_OK:
-        return "WRONG COORDS? - name found far away"
-    if s >= NAME_WEAK and d <= OK_DIST_M:
+        return "CHECK - name OK, 0.5-1.5 km away"
+    if d <= OK_DIST_M:
         return "CHECK - similar name nearby"
-    return "NOT FOUND"
+    return None
+
+
+def classify_wide(row, b):
+    if not b or b["score"] < NAME_WEAK:
+        return None
+    pin_match = bool(pin_codes(row.get("Address", "")) & pin_codes(b["addr"]))
+    if b["score"] < NAME_OK and not pin_match:
+        return None
+    if pin_match or same_locality(row.get("Address", ""), b["addr"]):
+        return "WRONG COORDS - workshop found at its address, away from pin"
+    return "NOT AT PIN - same name found elsewhere (other branch?)"
 
 
 # ----------------------------- main -----------------------------
@@ -301,19 +366,31 @@ def main():
                 if pd.isna(lat) or pd.isna(lon):
                     df.at[i, "Status"] = "NO COORDINATES"
                     continue
-                b = best_candidate(row["Name"], lat, lon, api.text_search(search_query(row), lat, lon))
-                status = classify(b)
-                if status in ("NOT FOUND", "CHECK - similar name nearby"):
-                    # second chance: anything Tata-branded close to the point?
+                name = base_name(row)
+                b = best_candidate(row, lat, lon, api.local_search(name, lat, lon))
+                status = classify_local(b)
+                if status in (None, "CHECK - similar name nearby"):
+                    # anything Tata-branded close to the point?
                     near = api.nearby_tata(lat, lon)
                     tata = [p.get("displayName", {}).get("text", "") for p in near
                             if "tata" in p.get("displayName", {}).get("text", "").lower()]
                     df.at[i, "Tata place within 500 m"] = " | ".join(tata[:3])
-                    b2 = best_candidate(row["Name"], lat, lon, near)
-                    if b2 and (not b or b2["key"] > b["key"]):
-                        b, status = b2, classify(b2)
-                    if status == "NOT FOUND" and tata:
-                        status = "CHECK - Tata place nearby, name differs"
+                    b2 = best_candidate(row, lat, lon, near)
+                    s2 = classify_local(b2)
+                    if s2 and (status is None or b2["key"] > b["key"]):
+                        b, status = b2, s2
+                if status is None:
+                    # not near the pin: where does Google have this workshop?
+                    bw = best_candidate(row, lat, lon, api.wide_search(wide_query(row), lat, lon))
+                    status = classify_wide(row, bw)
+                    if status:
+                        b = bw
+                    elif df.at[i, "Tata place within 500 m"]:
+                        status = "CHECK - Tata place near pin, name differs"
+                    else:
+                        status = "NOT FOUND"
+                    if not status.startswith(("WRONG", "NOT AT")):
+                        b = None
                 df.at[i, "Status"] = status
                 if b:
                     df.at[i, "Name match %"] = round(b["score"])

@@ -13,15 +13,23 @@ python verify.py Workshopdata.kml                  # full run
 The API key comes from the `GOOGLE_MAPS_API_KEY` Codespaces secret.
 Results are cached in `places_cache.json`. If the run stops, run the same command again: finished rows are not called (or billed) again.
 
+## How it searches
+1. Searches the workshop name **only within ~1 km of the given pin**.
+2. If not found there, looks for any Tata-branded place within 500 m.
+3. If still not found, searches the name (+ PIN code from the Address) over a wider area and
+   compares Google's address with ours to tell "pin is wrong" from "that's another branch".
+
 ## Status meanings
-| Status | Meaning |
-|---|---|
-| VERIFIED | Name matches (≥80%) and the place is within 200 m |
-| CHECK - name OK, 200-500 m away | Probably correct, small coordinate shift |
-| WRONG COORDS? - name found far away | Google has this workshop somewhere else; use Google lat/lon after checking |
-| CHECK - similar name nearby | Partial name match (60–80%) within 200 m |
-| CHECK - Tata place nearby, name differs | A Tata-branded listing is within 500 m but under another name |
-| NOT FOUND | Nothing matching on Google; check manually or the workshop may not be listed |
+| Status | Meaning | Action |
+|---|---|---|
+| VERIFIED | Name matches and place is within 200 m | none |
+| CHECK - name OK, 200-500 m away | Small shift | glance at map |
+| CHECK - name OK, 0.5-1.5 km away | Pin is off by up to ~1.5 km | fix pin |
+| CHECK - similar name nearby | Partial name match within 200 m | confirm name |
+| CHECK - Tata place near pin, name differs | A Tata listing is near the pin under another name | confirm |
+| WRONG COORDS - workshop found at its address, away from pin | Google has it at the PIN/locality in our Address | replace with Google lat/lon after a look |
+| NOT AT PIN - same name found elsewhere (other branch?) | Same dealer name, different town | check manually |
+| NOT FOUND | Nothing on Google near the pin | check manually |
 
 **Pre-check flags** (free, offline): duplicate coordinates, coordinates outside India, coordinates far from the stated State.
 
