@@ -353,13 +353,13 @@ def write_report(df, path):
     flag_summary = flags.value_counts().rename_axis("Pre-check flag").reset_index(name="Count")
 
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
-        summary.to_excel(xw, "Summary", index=False)
-        flag_summary.to_excel(xw, "Summary", index=False, startrow=len(summary) + 3)
-        df.to_excel(xw, "All workshops", index=False)
+        summary.to_excel(xw, sheet_name="Summary", index=False)
+        flag_summary.to_excel(xw, sheet_name="Summary", index=False, startrow=len(summary) + 3)
+        df.to_excel(xw, sheet_name="All workshops", index=False)
         flagged = df["Pre-check flags"].fillna("") != ""
         offline = (df["Status"] == "OFFLINE ONLY").all()
         todo = df[flagged] if offline else df[(df["Status"] != "VERIFIED") | flagged]
-        todo.to_excel(xw, "To check manually", index=False)
+        todo.to_excel(xw, sheet_name="To check manually", index=False)
         for ws in xw.book.worksheets:
             ws.freeze_panes = "A2"
             ws.auto_filter.ref = ws.dimensions if ws.title != "Summary" else None
