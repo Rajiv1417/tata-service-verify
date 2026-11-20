@@ -1,0 +1,5 @@
+pandas
+openpyxl
+requests
+rapidfuzz
+reverse_geocoder

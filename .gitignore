@@ -1,0 +1,7 @@
+*.xlsx
+*.xls
+*.csv
+*.kml
+*.kmz
+places_cache.json
+__pycache__/
